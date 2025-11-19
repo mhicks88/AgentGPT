@@ -1,6 +1,6 @@
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["ReferentialIntegrity"]
+  previewFeatures = ["referentialIntegrity"]
 }
 
 datasource db {
@@ -9,11 +9,148 @@ datasource db {
   relationMode = "prisma"
 }
 
-enum Role {
-  ADMIN
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  AGENT        // Standard agent - can manage own leads and make calls
+  SUPERVISOR   // Can view team metrics, manage agents
+  ADMIN        // Full tenant admin - can configure settings
+  SYSTEM_ADMIN // Platform admin (super user)
 }
 
-// Necessary for Next auth
+enum LeadStatus {
+  NEW              // Just created, not contacted
+  CONTACTED        // Agent has made contact
+  QUALIFIED        // Lead is qualified/interested
+  SOA_PENDING      // Scope of Appointment requested
+  SOA_SIGNED       // SOA is signed and valid
+  APPOINTMENT_SET  // Appointment scheduled
+  ENROLLED         // Successfully enrolled in a plan
+  NOT_INTERESTED   // Lead declined
+  DO_NOT_CONTACT   // Explicit DNC request
+  CALLBACK         // Requested callback
+  NURTURE          // Long-term follow-up
+  LOST             // Lost to competitor or other reason
+}
+
+enum LeadSource {
+  INBOUND_CALL
+  WEB_FORM
+  REFERRAL
+  PURCHASED_LIST
+  EVENT
+  SOCIAL_MEDIA
+  EMAIL_CAMPAIGN
+  OTHER
+}
+
+enum CallStatus {
+  INITIATED    // Call started
+  RINGING      // Ringing
+  IN_PROGRESS  // Call connected
+  COMPLETED    // Call finished normally
+  NO_ANSWER    // No answer
+  BUSY         // Line busy
+  FAILED       // Call failed
+  VOICEMAIL    // Went to voicemail
+  CANCELLED    // Cancelled before connection
+}
+
+enum CallDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum CallOutcome {
+  CONNECTED           // Spoke with lead
+  NO_ANSWER          // No answer
+  LEFT_VOICEMAIL     // Left voicemail
+  BUSY               // Line busy
+  WRONG_NUMBER       // Wrong number
+  CALLBACK_REQUESTED // Lead wants callback
+  SOA_OBTAINED       // Successfully got SOA
+  APPOINTMENT_SET    // Set appointment
+  NOT_INTERESTED     // Lead not interested
+  DNC_REQUESTED      // Lead requested DNC
+  INFORMATION_GIVEN  // Provided information
+}
+
+enum SOAStatus {
+  PENDING     // Requested but not received
+  SIGNED      // Signed and valid
+  EXPIRED     // Past expiration date
+  REVOKED     // Explicitly revoked
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  OVERDUE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ComplianceRuleType {
+  PRE_CALL          // Rules evaluated before call
+  IN_CALL           // Rules for during call
+  POST_CALL         // Rules evaluated after call
+  DNC_CHECK         // Do Not Call verification
+  TIME_RESTRICTION  // Time-of-day/timezone restrictions
+  SOA_REQUIREMENT   // SOA validation
+  DISCLOSURE        // Required disclosures
+  RECORDING         // Call recording requirements
+  STATE_SPECIFIC    // State-level rules (Phase 2)
+}
+
+enum ComplianceCheckResult {
+  PASS              // Check passed
+  FAIL              // Check failed
+  WARNING           // Warning but not blocking
+  NOT_APPLICABLE    // Rule doesn't apply to this context
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  VIEW
+  CALL_INITIATED
+  CALL_COMPLETED
+  COMPLIANCE_CHECK
+  SOA_CAPTURED
+  SOA_UPDATED
+  DISCLAIMER_ACKNOWLEDGED
+  LEAD_ASSIGNED
+  STATUS_CHANGED
+  TASK_CREATED
+  TASK_COMPLETED
+  NOTE_ADDED
+  CONFIGURATION_CHANGED
+  USER_LOGIN
+  USER_LOGOUT
+}
+
+enum DialerType {
+  ENROLL_HERE  // Phase 1
+  TWILIO       // Phase 2
+  FIVE9        // Phase 2
+  CONVOSO      // Phase 2
+  CUSTOM       // Custom integration
+}
+
+// ============================================================================
+// AUTHENTICATION & USERS (NextAuth Compatible)
+// ============================================================================
+
 model Account {
   id                String  @id @default(cuid())
   userId            String
@@ -27,9 +164,11 @@ model Account {
   scope             String?
   id_token          String? @db.Text
   session_state     String?
-  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Session {
@@ -37,22 +176,10 @@ model Session {
   sessionToken String   @unique
   userId       String
   expires      DateTime
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
 
-model User {
-  id             String    @id @default(cuid())
-  name           String?
-  email          String?   @unique
-  emailVerified  DateTime?
-  image          String?
-  role           Role?
-  subscriptionId String?   @db.Text
-  customerId     String?   @db.Text
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  accounts Account[]
-  sessions Session[]
-  Agent    Agent[]
+  @@index([userId])
 }
 
 model VerificationToken {
@@ -63,6 +190,641 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
+// ============================================================================
+// MULTI-TENANT CORE
+// ============================================================================
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String   // Agency/Organization name
+  slug      String   @unique // URL-friendly identifier
+
+  // Contact info
+  email     String?
+  phone     String?
+  address   String?  @db.Text
+
+  // Subscription/billing
+  subscriptionId String? @db.Text
+  customerId     String? @db.Text
+  planTier       String? // e.g., "starter", "professional", "enterprise"
+
+  // Settings
+  timezone       String  @default("America/New_York")
+  businessHours  Json?   // { "monday": { "start": "09:00", "end": "17:00" }, ... }
+
+  // Status
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users                  User[]
+  leads                  Lead[]
+  complianceRules        ComplianceRule[]
+  dialerConfigurations   DialerConfiguration[]
+  auditLogs              AuditLog[]
+  leadStatuses           LeadStatusConfig[]
+  disclaimerTemplates    DisclaimerTemplate[]
+
+  @@index([slug])
+  @@index([isActive])
+}
+
+model User {
+  id             String    @id @default(cuid())
+  tenantId       String?   // Nullable for system admins
+
+  // Auth fields (NextAuth compatible)
+  name           String?
+  email          String?   @unique
+  emailVerified  DateTime?
+  image          String?
+
+  // CRM-specific fields
+  role           UserRole  @default(AGENT)
+  title          String?   // e.g., "Senior Agent", "Team Lead"
+  phone          String?
+
+  // Agent-specific
+  agentLicenseNumber String? // Insurance license number
+  licenseState       String? // State of license
+  licenseExpiry      DateTime?
+
+  // Subscription (legacy from AgentGPT - keeping for compatibility)
+  subscriptionId String?   @db.Text
+  customerId     String?   @db.Text
+
+  // Status
+  isActive       Boolean   @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  tenant                    Tenant?                    @relation(fields: [tenantId], references: [id])
+  accounts                  Account[]
+  sessions                  Session[]
+  assignedLeads             Lead[]                     @relation("AssignedAgent")
+  createdLeads              Lead[]                     @relation("LeadCreator")
+  calls                     Call[]
+  tasks                     Task[]
+  notes                     Note[]
+  activities                Activity[]
+  auditLogs                 AuditLog[]
+  soasCreated               SOA[]
+  complianceCheckRuns       ComplianceCheckRun[]       @relation("ComplianceChecker")
+  disclaimerAcknowledgments DisclaimerAcknowledgment[]
+
+  @@index([tenantId])
+  @@index([email])
+  @@index([role])
+  @@index([isActive])
+}
+
+// ============================================================================
+// CRM CORE - LEADS & CONTACTS
+// ============================================================================
+
+model Lead {
+  id         String     @id @default(cuid())
+  tenantId   String
+
+  // Basic info
+  firstName  String
+  lastName   String
+  email      String?
+
+  // Status & assignment
+  status     LeadStatus @default(NEW)
+  source     LeadSource @default(OTHER)
+  assignedTo String?    // Agent user ID
+  createdBy  String?    // User who created the lead
+
+  // Medicare-specific
+  dateOfBirth     DateTime?
+  medicareNumber  String?
+  isCurrentlyInsured Boolean @default(false)
+  currentCarrier  String?
+
+  // Compliance flags
+  isDNC           Boolean @default(false) // Do Not Contact
+  dncReason       String? @db.Text
+  dncDate         DateTime?
+
+  // Metadata
+  customFields Json?      // Extensible JSON for custom data
+  tags         String?    // Comma-separated tags
+
+  // Tracking
+  lastContactedAt DateTime?
+  nextFollowUpAt  DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedAgent User?           @relation("AssignedAgent", fields: [assignedTo], references: [id])
+  creator       User?           @relation("LeadCreator", fields: [createdBy], references: [id])
+  contactInfo   ContactInfo[]
+  calls         Call[]
+  tasks         Task[]
+  notes         Note[]
+  activities    Activity[]
+  soa           SOA?
+  opportunities Opportunity[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([assignedTo])
+  @@index([createdBy])
+  @@index([isDNC])
+  @@index([lastContactedAt])
+  @@index([nextFollowUpAt])
+  @@index([createdAt])
+}
+
+model ContactInfo {
+  id       String  @id @default(cuid())
+  leadId   String
+
+  type     String  // "phone", "email", "address", "mobile", "work_phone"
+  value    String  @db.Text
+  label    String? // "Primary", "Secondary", "Work", "Home"
+  isPrimary Boolean @default(false)
+
+  // For phone numbers
+  isVerified Boolean @default(false)
+  isMobile   Boolean @default(false)
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([type])
+  @@index([isPrimary])
+}
+
+model LeadStatusConfig {
+  id          String  @id @default(cuid())
+  tenantId    String
+
+  statusValue String  // Maps to LeadStatus enum
+  displayName String  // Custom display name
+  color       String? // Hex color for UI
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, statusValue])
+  @@index([tenantId])
+}
+
+// ============================================================================
+// OPPORTUNITIES / POLICIES
+// ============================================================================
+
+model Opportunity {
+  id          String  @id @default(cuid())
+  leadId      String
+  tenantId    String
+
+  // Product info
+  productType     String  // "Medicare Advantage", "Medicare Supplement", "Part D", etc.
+  carrier         String?
+  planName        String?
+
+  // Financial
+  estimatedValue  Float?  // Annual premium or commission
+  actualValue     Float?  // Actual after enrollment
+
+  // Status
+  stage           String  // "Prospect", "Quote Provided", "Application", "Enrolled"
+  probability     Int     @default(0) // 0-100
+
+  // Dates
+  expectedCloseDate DateTime?
+  actualCloseDate   DateTime?
+  effectiveDate     DateTime? // When policy starts
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([tenantId])
+  @@index([stage])
+}
+
+// ============================================================================
+// DIALER INTEGRATION
+// ============================================================================
+
+model DialerConfiguration {
+  id        String     @id @default(cuid())
+  tenantId  String
+
+  dialerType     DialerType
+  name           String     // Friendly name, e.g., "Production EnrollHere"
+
+  // Credentials (encrypted in production)
+  apiKey         String?    @db.Text
+  apiSecret      String?    @db.Text
+  accountSid     String?    // For Twilio, etc.
+  baseUrl        String?    // API base URL
+  webhookSecret  String?    // For verifying webhooks
+
+  // Configuration
+  config    Json? // Dialer-specific config as JSON
+
+  // Status
+  isActive  Boolean  @default(true)
+  isPrimary Boolean  @default(false) // Primary dialer for tenant
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  calls  Call[]
+
+  @@index([tenantId])
+  @@index([dialerType])
+  @@index([isActive])
+}
+
+model Call {
+  id               String      @id @default(cuid())
+  tenantId         String
+  leadId           String
+  userId           String      // Agent who made/received the call
+  dialerConfigId   String?
+
+  // Call details
+  direction        CallDirection
+  status           CallStatus
+  outcome          CallOutcome?
+
+  // Phone numbers
+  fromNumber       String?
+  toNumber         String?
+
+  // Timing
+  initiatedAt      DateTime    @default(now())
+  startedAt        DateTime?   // When call connected
+  endedAt          DateTime?   // When call ended
+  duration         Int?        // Duration in seconds
+
+  // Dialer metadata
+  dialerCallId     String?     // External dialer's call ID
+  dialerMetadata   Json?       // Additional dialer-specific data
+
+  // Notes
+  notes            String?     @db.Text
+
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  // Relations
+  lead                      Lead                       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agent                     User                       @relation(fields: [userId], references: [id])
+  dialerConfig              DialerConfiguration?       @relation(fields: [dialerConfigId], references: [id])
+  recording                 CallRecording?
+  complianceCheckRuns       ComplianceCheckRun[]
+  disclaimerAcknowledgments DisclaimerAcknowledgment[]
+  callNotes                 CallNote[]
+
+  @@index([tenantId])
+  @@index([leadId])
+  @@index([userId])
+  @@index([status])
+  @@index([initiatedAt])
+  @@index([dialerCallId])
+}
+
+model CallRecording {
+  id          String   @id @default(cuid())
+  callId      String   @unique
+
+  // Storage
+  recordingUrl      String  @db.Text // S3 URL or external storage
+  duration          Int?    // Duration in seconds
+  fileSize          Int?    // File size in bytes
+  format            String? // e.g., "mp3", "wav"
+
+  // Transcription (Phase 2)
+  transcriptUrl     String? @db.Text
+  transcriptText    String? @db.Text
+
+  // Metadata
+  isProcessed       Boolean @default(false)
+  processingError   String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+}
+
+model CallNote {
+  id        String   @id @default(cuid())
+  callId    String
+
+  content   String   @db.Text
+  timestamp DateTime @default(now()) // When during call this was noted
+
+  createdAt DateTime @default(now())
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+}
+
+// ============================================================================
+// COMPLIANCE ENGINE
+// ============================================================================
+
+model ComplianceRule {
+  id          String             @id @default(cuid())
+  tenantId    String
+
+  name        String
+  description String?            @db.Text
+  ruleType    ComplianceRuleType
+
+  // Rule configuration
+  config      Json               // Rule-specific configuration
+  // Example for DNC: { "checkInternalDNC": true, "checkFederalDNC": true }
+  // Example for TIME_RESTRICTION: { "allowedHours": { "start": "08:00", "end": "21:00" }, "timezone": "lead" }
+
+  // Status
+  isActive    Boolean            @default(true)
+  isBlocking  Boolean            @default(true) // If false, generates warning only
+  priority    Int                @default(0)    // Execution order
+
+  // Metadata
+  createdBy   String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  tenant              Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  complianceCheckRuns ComplianceCheckRun[]
+
+  @@index([tenantId])
+  @@index([ruleType])
+  @@index([isActive])
+}
+
+model ComplianceCheckRun {
+  id          String                 @id @default(cuid())
+  tenantId    String
+  callId      String?                // Associated call (null for pre-call checks)
+  leadId      String?                // Associated lead
+  userId      String                 // Agent being checked
+
+  checkType   ComplianceRuleType     // What type of check was run
+  result      ComplianceCheckResult
+
+  // Results
+  rulesEvaluated Json                // Array of rule IDs evaluated
+  failures       Json?               // Details of any failures
+  warnings       Json?               // Details of any warnings
+  evidence       Json?               // Supporting evidence/data
+
+  // Timing
+  executedAt  DateTime               @default(now())
+
+  // Relations
+  call  Call?            @relation(fields: [callId], references: [id], onDelete: Cascade)
+  agent User             @relation("ComplianceChecker", fields: [userId], references: [id])
+  rules ComplianceRule[]
+
+  @@index([tenantId])
+  @@index([callId])
+  @@index([leadId])
+  @@index([userId])
+  @@index([result])
+  @@index([executedAt])
+}
+
+model SOA {
+  id          String    @id @default(cuid())
+  leadId      String    @unique
+  tenantId    String
+
+  status      SOAStatus @default(PENDING)
+
+  // SOA details
+  productsDiscussed String? @db.Text // "Medicare Advantage, Part D"
+
+  // Dates
+  requestedAt   DateTime  @default(now())
+  signedAt      DateTime?
+  expiresAt     DateTime? // CMS requires SOA within certain timeframe
+  revokedAt     DateTime?
+
+  // Capture method
+  captureMethod String?   // "Electronic", "Verbal", "Physical Form"
+  documentUrl   String?   @db.Text // S3 URL if uploaded
+
+  // Signature
+  ipAddress     String?
+  userAgent     String?   @db.Text
+
+  // Metadata
+  notes         String?   @db.Text
+  createdBy     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lead    Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  creator User? @relation(fields: [createdBy], references: [id])
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([leadId])
+}
+
+model DisclaimerTemplate {
+  id          String  @id @default(cuid())
+  tenantId    String
+
+  name        String
+  description String? @db.Text
+
+  // Content
+  text        String  @db.Text // The actual disclaimer text
+
+  // Rules
+  isRequired  Boolean @default(true)
+  appliesTo   Json?   // Conditions when this applies { "productTypes": ["MA", "PDP"], "states": ["CA"] }
+
+  // Status
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant                    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  disclaimerAcknowledgments DisclaimerAcknowledgment[]
+
+  @@index([tenantId])
+  @@index([isActive])
+}
+
+model DisclaimerAcknowledgment {
+  id          String   @id @default(cuid())
+  callId      String
+  disclaimerId String
+  userId      String   // Agent who acknowledged
+
+  // Acknowledgment
+  wasRead     Boolean  @default(false)
+  wasAcknowledged Boolean @default(false)
+
+  // Evidence
+  timestamp   DateTime @default(now())
+  notes       String?  @db.Text
+
+  call       Call               @relation(fields: [callId], references: [id], onDelete: Cascade)
+  disclaimer DisclaimerTemplate @relation(fields: [disclaimerId], references: [id])
+  agent      User               @relation(fields: [userId], references: [id])
+
+  @@index([callId])
+  @@index([disclaimerId])
+  @@index([userId])
+}
+
+// ============================================================================
+// TASKS, NOTES & ACTIVITIES
+// ============================================================================
+
+model Task {
+  id          String       @id @default(cuid())
+  tenantId    String
+  leadId      String?      // Associated lead (optional)
+  assignedTo  String       // User ID
+  createdBy   String?      // User who created it
+
+  title       String
+  description String?      @db.Text
+
+  status      TaskStatus   @default(PENDING)
+  priority    TaskPriority @default(MEDIUM)
+
+  // Scheduling
+  dueAt       DateTime?
+  completedAt DateTime?
+
+  // Metadata
+  customFields Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead     Lead? @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee User  @relation(fields: [assignedTo], references: [id])
+
+  @@index([tenantId])
+  @@index([leadId])
+  @@index([assignedTo])
+  @@index([status])
+  @@index([dueAt])
+  @@index([createdAt])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  tenantId  String
+  leadId    String
+  userId    String   // User who created the note
+
+  content   String   @db.Text
+  isPinned  Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([leadId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Activity {
+  id          String   @id @default(cuid())
+  tenantId    String
+  leadId      String
+  userId      String?  // User who performed the action (null for system)
+
+  type        String   // "status_change", "call_completed", "note_added", "task_completed", etc.
+  description String   @db.Text
+
+  // Metadata
+  metadata    Json?    // Additional context
+
+  createdAt   DateTime @default(now())
+
+  lead Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([leadId])
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// AUDIT LOGGING (Immutable)
+// ============================================================================
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  tenantId    String?     // Null for system-level actions
+  userId      String?     // Actor (null for system actions)
+
+  action      AuditAction
+  entityType  String      // "Lead", "Call", "SOA", "User", etc.
+  entityId    String      // ID of the entity
+
+  // Change tracking
+  before      Json?       // State before (for updates)
+  after       Json?       // State after (for creates/updates)
+
+  // Context
+  metadata    Json?       // Additional context (IP, user agent, etc.)
+
+  // Immutable timestamp
+  createdAt   DateTime    @default(now())
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// LEGACY MODELS (from original AgentGPT - can be removed later if not needed)
+// ============================================================================
+
 model Agent {
   id     String @id @default(cuid())
   userId String
@@ -71,6 +833,8 @@ model Agent {
 
   user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   AgentTask AgentTask[]
+
+  @@index([userId])
 }
 
 model AgentTask {
@@ -80,4 +844,6 @@ model AgentTask {
   result  String
 
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
 }
